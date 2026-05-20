@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-05-20
+
+### Fixed
+- Delay fallback summary auto-refresh until Pi reports idle; session replacements cancel stale handoffs, while idle timeouts warn and still send the hidden handoff.
+- Queue chained boomerang steps as follow-ups so they advance from Pi 0.75.4 `agent_end` handlers without busy-agent errors.
+- Document the correct `pi install npm:pi-boomerang` install command.
+- Preserve much longer validation commands and failure details in boomerang summaries while still bounding huge logs.
+
 ## [0.6.5] - 2026-05-03
 
 ### Fixed

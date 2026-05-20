@@ -1,6 +1,6 @@
 {
   "name": "pi-boomerang",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "description": "Token-efficient autonomous task execution with context collapse",
   "type": "module",
   "keywords": [
@@ -20,12 +20,12 @@
     "typebox": "^1.1.24"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=0.75.4"
   },
   "devDependencies": {
     "vitest": "^2.0.0",
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-ai": "*"
+    "@earendil-works/pi-coding-agent": "0.75.4",
+    "@earendil-works/pi-ai": "0.75.4"
   },
   "pi": {
     "extensions": [

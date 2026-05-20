@@ -1,14 +1,17 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_COMPACTION_SETTINGS } from "@mariozechner/pi-coding-agent";
+import { DEFAULT_COMPACTION_SETTINGS } from "@earendil-works/pi-coding-agent";
 import type {
+  AgentEndEvent,
   ExtensionAPI,
   ExtensionContext,
   ExtensionCommandContext,
   SessionBeforeCompactEvent,
   SessionEntry,
-} from "@mariozechner/pi-coding-agent";
+  SessionShutdownEvent,
+  SessionStartEvent,
+} from "@earendil-works/pi-coding-agent";
 
 const mockState = vi.hoisted(() => ({
   homeDir: "",
@@ -22,7 +25,7 @@ vi.mock("node:os", async () => {
   };
 });
 
-import boomerangExtension, { getEffectiveArgs, parseChain, extractRethrow } from "./index.js";
+import boomerangExtension, { getEffectiveArgs, parseChain, extractRethrow } from "./index.ts";
 
 type MockEditorFactory = (
   tui: unknown,
@@ -194,6 +197,7 @@ describe("Boomerang Extension", () => {
   let editorText: string;
   let editorReloadSubmissions: string[];
   let editorReloadShouldFail: boolean;
+  let editorReloadShutdownReason: SessionShutdownEvent["reason"] | null;
 
   let uiMock: {
     notify: ReturnType<typeof vi.fn>;
@@ -325,6 +329,14 @@ describe("Boomerang Extension", () => {
     });
   }
 
+  function addUserTextEntry(text: string) {
+    return addSessionEntry({
+      type: "message",
+      message: { role: "user", content: text, timestamp: Date.now() },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   function addAssistantTextEntry(text: string) {
     return addSessionEntry({
       type: "message",
@@ -415,11 +427,12 @@ describe("Boomerang Extension", () => {
     return handler ? await handler({ type: "input", text, source }, mockCtx) : undefined;
   }
 
-  async function triggerAgentEnd(ctx: ExtensionContext = mockCtx) {
-    agentIdle = true;
+  async function triggerAgentEnd(ctx: ExtensionContext = mockCtx, options: { idle?: boolean } = {}) {
+    agentIdle = options.idle ?? true;
     const handler = getHandler("agent_end");
     if (handler) {
-      await handler({}, ctx);
+      const event: AgentEndEvent = { type: "agent_end", messages: [] };
+      await handler(event, ctx);
     }
   }
 
@@ -440,12 +453,18 @@ describe("Boomerang Extension", () => {
     };
   }
 
-  async function fireSessionStart() {
-    await getHandler("session_start")({ type: "session_start" }, mockCtx);
+  async function fireSessionStart(reason: SessionStartEvent["reason"] = "startup") {
+    const event: SessionStartEvent = { type: "session_start", reason };
+    await getHandler("session_start")(event, mockCtx);
   }
 
-  async function fireSessionSwitch() {
-    await getHandler("session_switch")({ type: "session_switch", reason: "resume", previousSessionFile: "previous.jsonl" }, mockCtx);
+  async function fireSessionShutdown(reason: SessionShutdownEvent["reason"] = "resume") {
+    const event: SessionShutdownEvent = { type: "session_shutdown", reason, targetSessionFile: "next.jsonl" };
+    await getHandler("session_shutdown")(event, mockCtx);
+  }
+
+  async function fireSessionReplacement() {
+    await fireSessionShutdown("resume");
   }
 
   function notifyMessages() {
@@ -498,6 +517,7 @@ describe("Boomerang Extension", () => {
     editorText = "";
     editorReloadSubmissions = [];
     editorReloadShouldFail = false;
+    editorReloadShutdownReason = null;
     switchFailures = new Set();
 
     currentLeafId = "entry-0";
@@ -536,6 +556,9 @@ describe("Boomerang Extension", () => {
             throw new Error("editor reload failed");
           }
           reloadCalls++;
+          if (editorReloadShutdownReason) {
+            await fireSessionShutdown(editorReloadShutdownReason);
+          }
         };
       }),
       getEditorText: vi.fn(() => editorText),
@@ -589,7 +612,10 @@ describe("Boomerang Extension", () => {
       registerCommand: vi.fn((name: string, options: { description: string; handler: Function }) => commands.set(name, options)),
       registerTool: vi.fn((tool: { name: string; execute: Function }) => tools.set(tool.name, tool)),
       registerShortcut: vi.fn((key: string, options: { description: string; handler: Function }) => shortcuts.set(key, options)),
-      sendUserMessage: vi.fn((content: string) => {
+      sendUserMessage: vi.fn((content: string, options?: { deliverAs?: "steer" | "followUp" }) => {
+        if (!agentIdle && !options?.deliverAs) {
+          throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+        }
         agentIdle = false;
         sentMessages.push(content);
         addSessionEntry({
@@ -627,6 +653,7 @@ describe("Boomerang Extension", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     delete globalThis.__boomerangCollapseInProgress;
     rmSync(tempRoot, { recursive: true, force: true });
   });
@@ -759,6 +786,18 @@ describe("Boomerang Extension", () => {
       expect(sentMessages).toEqual(["Step 1", "Step 2"]);
     });
 
+    it("queues the next chain step as a follow-up during streaming agent_end", async () => {
+      writePrompt("user", "step1", "Step 1");
+      writePrompt("user", "step2", "Step 2");
+
+      await runBoomerang("/step1 -> /step2 -- task");
+      addAssistantTextEntry("Step 1 done");
+      await triggerAgentEnd(mockCtx, { idle: false });
+
+      expect(sentMessages).toEqual(["Step 1", "Step 2"]);
+      expect(mockPi.sendUserMessage).toHaveBeenNthCalledWith(2, "Step 2", { deliverAs: "followUp" });
+    });
+
     it("summarizes only after the last chain step", async () => {
       writePrompt("user", "step1", "Step 1");
       writePrompt("user", "step2", "Step 2");
@@ -810,7 +849,7 @@ describe("Boomerang Extension", () => {
       writePrompt("user", "step2", "Step 2");
 
       await runBoomerang("/step1 -> /step2 -- task");
-      await getHandler("session_start")({}, mockCtx);
+      await fireSessionStart();
       await triggerAgentEnd();
 
       expect(navigateTreeCalls).toHaveLength(0);
@@ -1150,6 +1189,36 @@ describe("Boomerang Extension", () => {
       expect(capturedSummary.summary.summary).toContain(longText);
     });
 
+    it("keeps long validation commands and failure text in the summary", async () => {
+      const longValidationCommand = `npm test -- ${"a".repeat(180)} --full-command-marker`;
+      const longFailure = `failure-start ${"b".repeat(220)} failure-detail-marker`;
+
+      await runBoomerang("debug failing validation");
+      const bashId = addAssistantToolEntry("bash", { command: longValidationCommand });
+      addToolResultEntry("bash", true, longFailure, bashId);
+      addAssistantTextEntry("Validation still failed.");
+      await triggerAgentEnd();
+
+      const summary = capturedSummary.summary.summary;
+      expect(summary).toContain(`- Validation: \`${longValidationCommand}\``);
+      expect(summary).toContain("failure-detail-marker");
+      expect(summary).not.toContain("--full-command...");
+    });
+
+    it("bounds extremely long failure text in the summary", async () => {
+      const oversizedFailure = "x".repeat(2200);
+
+      await runBoomerang("debug huge failure");
+      const bashId = addAssistantToolEntry("bash", { command: "npm test" });
+      addToolResultEntry("bash", true, oversizedFailure, bashId);
+      addAssistantTextEntry("Validation failed with a huge log.");
+      await triggerAgentEnd();
+
+      const summary = capturedSummary.summary.summary;
+      expect(summary).toContain(`${"x".repeat(2000)}... [truncated 200 chars]`);
+      expect(summary).not.toContain(oversizedFailure);
+    });
+
     it("includes Config block when template switched model, thinking, or skill", async () => {
       writePrompt("user", "full-config", "---\nmodel: claude-opus-4-6\nskill: git-workflow\nthinking: high\n---\nDo the task");
       writeSkill("user", "git-workflow", "Git skill content");
@@ -1380,7 +1449,7 @@ describe("Boomerang Extension", () => {
 
       const running = runBoomerang("/task --rethrow 2");
       await Promise.resolve();
-      await getHandler("session_start")({}, mockCtx);
+      await fireSessionStart();
       releaseWaitForIdle?.();
       await running;
 
@@ -1791,11 +1860,11 @@ describe("Boomerang Extension", () => {
       expect(globalThis.__boomerangCollapseInProgress).toBeFalsy();
     });
 
-    it("restores model and thinking when the session switches mid-boomerang", async () => {
+    it("restores model and thinking when the session is replaced mid-boomerang", async () => {
       writePrompt("user", "deep-dive", "---\nmodel: claude-opus-4-6\nthinking: xhigh\n---\nInspect $@");
 
       await runBoomerang("/deep-dive auth");
-      await fireSessionSwitch();
+      await fireSessionReplacement();
 
       expect(currentModel).toEqual(model("anthropic", "current-model"));
       expect(currentThinking).toBe("low");
@@ -1929,7 +1998,7 @@ describe("Boomerang Extension", () => {
 
     it("cancels compaction after fallback summary followed by hidden handoff", async () => {
       await runBoomerang("tool on");
-      await fireSessionSwitch();
+      await fireSessionReplacement();
 
       const tool = getTool("boomerang");
       await tool.execute("id-1", {}, undefined, undefined, mockCtx);
@@ -1954,7 +2023,7 @@ describe("Boomerang Extension", () => {
 
     it("does not cancel compaction after unrelated entries follow the fallback handoff", async () => {
       await runBoomerang("tool on");
-      await fireSessionSwitch();
+      await fireSessionReplacement();
 
       const tool = getTool("boomerang");
       await tool.execute("id-1", {}, undefined, undefined, mockCtx);
@@ -1971,7 +2040,7 @@ describe("Boomerang Extension", () => {
 
     it("does not wake the orchestrator when fallback branch summary creation throws", async () => {
       await runBoomerang("tool on");
-      await fireSessionSwitch();
+      await fireSessionReplacement();
 
       const branchWithSummary = (mockCtx.sessionManager as any).branchWithSummary as ReturnType<typeof vi.fn>;
       branchWithSummary.mockImplementationOnce(() => {
@@ -2155,11 +2224,7 @@ describe("Boomerang Extension", () => {
       expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", "[accent]🪃 auto");
 
       const beforeStart = await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "fix auth", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("fix auth");
 
       expect(beforeStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
       expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", "[warning]boomerang");
@@ -2182,11 +2247,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("shortcut task");
       const beforeStart = await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "shortcut task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("shortcut task");
       addAssistantTextEntry("Shortcut task done.");
       await triggerAgentEnd();
 
@@ -2203,6 +2264,52 @@ describe("Boomerang Extension", () => {
       expect(editorReloadSubmissions).toEqual(["/reload"]);
       expect(reloadCalls).toBe(1);
       expect(notifyMessages().some(({ message }) => message.includes("Run /reload to refresh"))).toBe(false);
+
+      const event = makeBeforeCompactEvent();
+      await expect(getHandler("session_before_compact")(event, mockCtx)).resolves.toEqual({ cancel: true });
+    });
+
+    it("waits for agent idle before shortcut-first fallback reload", async () => {
+      vi.useFakeTimers();
+      await getShortcut("ctrl+alt+b")(mockCtx);
+
+      await fireInput("idle-gated shortcut task");
+      await fireBeforeAgentStart("original");
+      addUserTextEntry("idle-gated shortcut task");
+      addAssistantTextEntry("Shortcut task done.");
+
+      await triggerAgentEnd(mockCtx, { idle: false });
+
+      expect(branchWithSummaryCalls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(editorReloadSubmissions).toEqual([]);
+      expect(sentCustomMessages).toHaveLength(0);
+
+      agentIdle = true;
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(editorReloadSubmissions).toEqual(["/reload"]);
+      expect(reloadCalls).toBe(1);
+      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+    });
+
+    it("still sends the hidden handoff when editor reload emits session shutdown", async () => {
+      editorReloadShutdownReason = "reload";
+      await getShortcut("ctrl+alt+b")(mockCtx);
+
+      await fireInput("editor reload emits shutdown task");
+      await fireBeforeAgentStart("original");
+      addUserTextEntry("editor reload emits shutdown task");
+      addAssistantTextEntry("Editor reload emits shutdown task done.");
+      await triggerAgentEnd();
+
+      expect(branchWithSummaryCalls).toHaveLength(1);
+      await flushDeferredFallbackHandoff();
+
+      expect(editorReloadSubmissions).toEqual(["/reload"]);
+      expect(reloadCalls).toBe(1);
+      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
     });
 
     it("preserves draft editor text around shortcut-first fallback reload", async () => {
@@ -2210,11 +2317,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("shortcut task with draft");
       await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "shortcut task with draft", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("shortcut task with draft");
       addAssistantTextEntry("Shortcut task done.");
       await triggerAgentEnd();
       editorText = "draft follow-up";
@@ -2233,11 +2336,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("shortcut reload failure task");
       await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "shortcut reload failure task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("shortcut reload failure task");
       addAssistantTextEntry("Shortcut task done.");
       await triggerAgentEnd();
 
@@ -2260,11 +2359,7 @@ describe("Boomerang Extension", () => {
 
       await getHandler("input")({ type: "input", text: "no ui shortcut task", source: "interactive" }, noUiCtx);
       const beforeStart = await getHandler("before_agent_start")({ systemPrompt: "original" }, noUiCtx);
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "no ui shortcut task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("no ui shortcut task");
       addAssistantTextEntry("No UI task done.");
       await triggerAgentEnd(noUiCtx);
 
@@ -2284,11 +2379,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("one-shot task");
       const wrappedStart = await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "one-shot task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("one-shot task");
       addAssistantTextEntry("One-shot task done.");
       await triggerAgentEnd();
 
@@ -2311,11 +2402,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("context-backed first task");
       const beforeStart = await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "context-backed first task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("context-backed first task");
       addAssistantTextEntry("First task done.");
       await triggerAgentEnd();
 
@@ -2328,6 +2415,129 @@ describe("Boomerang Extension", () => {
       expect(reloadCalls).toBe(1);
       expect(editorReloadSubmissions).toEqual([]);
       expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+    });
+
+    it("waits for agent idle before cached command-context fallback reload", async () => {
+      vi.useFakeTimers();
+      sessionEntries = [];
+      currentLeafId = null;
+      await runBoomerang("auto on");
+
+      await fireInput("context idle-gated task");
+      await fireBeforeAgentStart("original");
+      addUserTextEntry("context idle-gated task");
+      addAssistantTextEntry("Idle-gated task done.");
+
+      await triggerAgentEnd(mockCtx, { idle: false });
+
+      expect(branchWithSummaryCalls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(reloadCalls).toBe(0);
+      expect(sentCustomMessages).toHaveLength(0);
+
+      agentIdle = true;
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(reloadCalls).toBe(1);
+      expect(editorReloadSubmissions).toEqual([]);
+      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+    });
+
+    it("skips fallback reload after idle timeout but still sends the hidden handoff", async () => {
+      vi.useFakeTimers();
+      sessionEntries = [];
+      currentLeafId = null;
+      await runBoomerang("auto on");
+
+      await fireInput("never idle task");
+      await fireBeforeAgentStart("original");
+      addUserTextEntry("never idle task");
+      addAssistantTextEntry("Never idle task done.");
+
+      await triggerAgentEnd(mockCtx, { idle: false });
+
+      expect(branchWithSummaryCalls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(reloadCalls).toBe(0);
+      expect(editorReloadSubmissions).toEqual([]);
+      expect(uiMock.notify).toHaveBeenCalledWith(
+        "Boomerang summary created, but automatic /reload timed out waiting for the current response to finish.",
+        "warning"
+      );
+      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+    });
+
+    it("cancels stale deferred fallback handoffs when the session shuts down", async () => {
+      vi.useFakeTimers();
+      sessionEntries = [];
+      currentLeafId = null;
+      await runBoomerang("auto on");
+
+      await fireInput("stale handoff task");
+      await fireBeforeAgentStart("original");
+      addUserTextEntry("stale handoff task");
+      addAssistantTextEntry("Stale handoff task done.");
+
+      await triggerAgentEnd(mockCtx, { idle: false });
+      await vi.advanceTimersByTimeAsync(0);
+      await fireSessionShutdown("reload");
+
+      agentIdle = true;
+      await vi.runOnlyPendingTimersAsync();
+
+      expect(reloadCalls).toBe(0);
+      expect(editorReloadSubmissions).toEqual([]);
+      expect(sentCustomMessages).toHaveLength(0);
+    });
+
+    it("still sends the hidden handoff when cached reload emits session shutdown", async () => {
+      sessionEntries = [];
+      currentLeafId = null;
+      const reloadingCtx = createCommandCtx({
+        reload: vi.fn(async () => {
+          reloadCalls++;
+          await fireSessionShutdown("reload");
+        }),
+      });
+      await runBoomerang("auto on", reloadingCtx);
+
+      await fireInput("reload emits shutdown task");
+      await fireBeforeAgentStart("original");
+      addUserTextEntry("reload emits shutdown task");
+      addAssistantTextEntry("Reload emits shutdown task done.");
+      await triggerAgentEnd();
+
+      expect(branchWithSummaryCalls).toHaveLength(1);
+      await flushDeferredFallbackHandoff();
+
+      expect(reloadCalls).toBe(1);
+      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+    });
+
+    it("cancels the hidden handoff when the session is replaced during cached reload", async () => {
+      sessionEntries = [];
+      currentLeafId = null;
+      const replacingCtx = createCommandCtx({
+        reload: vi.fn(async () => {
+          reloadCalls++;
+          await fireSessionShutdown("resume");
+        }),
+      });
+      await runBoomerang("auto on", replacingCtx);
+
+      await fireInput("reload replaced session task");
+      await fireBeforeAgentStart("original");
+      addUserTextEntry("reload replaced session task");
+      addAssistantTextEntry("Reload replaced session task done.");
+      await triggerAgentEnd();
+
+      expect(branchWithSummaryCalls).toHaveLength(1);
+      await flushDeferredFallbackHandoff();
+
+      expect(reloadCalls).toBe(1);
+      expect(sentCustomMessages).toHaveLength(0);
     });
 
     it("warns when cached command-context reload fails for fallback summaries", async () => {
@@ -2343,11 +2553,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("context reload failure task");
       await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "context reload failure task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("context reload failure task");
       addAssistantTextEntry("Reload failure task done.");
       await triggerAgentEnd();
 
@@ -2370,11 +2576,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("first task");
       const beforeStart = await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "first task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("first task");
       addAssistantTextEntry("First task done.");
       await triggerAgentEnd();
 
@@ -2394,11 +2596,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("next real prompt");
       const beforeStart = await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "next real prompt", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("next real prompt");
       addAssistantTextEntry("Next task done.");
       await triggerAgentEnd();
 
@@ -2419,11 +2617,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("cancelled auto task");
       await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "cancelled auto task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("cancelled auto task");
       addAssistantTextEntry("Done.");
       await triggerAgentEnd();
 
@@ -2447,11 +2641,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("throwing auto task");
       await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "throwing auto task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("throwing auto task");
       addAssistantTextEntry("Done.");
       await triggerAgentEnd();
 
@@ -2473,11 +2663,7 @@ describe("Boomerang Extension", () => {
 
       await fireInput("fallback failure task");
       await fireBeforeAgentStart("original");
-      addSessionEntry({
-        type: "message",
-        message: { role: "user", content: "fallback failure task", timestamp: Date.now() },
-        timestamp: new Date().toISOString(),
-      });
+      addUserTextEntry("fallback failure task");
       addAssistantTextEntry("Done.");
       await triggerAgentEnd();
 
@@ -2504,12 +2690,12 @@ describe("Boomerang Extension", () => {
       expect(beforeStart).toBeUndefined();
     });
 
-    it("resets in-flight auto mode on session_switch", async () => {
+    it("resets in-flight auto mode on session replacement", async () => {
       await getShortcut("ctrl+alt+b")(mockCtx);
       await fireInput("switching prompt");
       await fireBeforeAgentStart("original");
 
-      await fireSessionSwitch();
+      await fireSessionReplacement();
       addAssistantTextEntry("Should not summarize.");
       await triggerAgentEnd();
 
@@ -2582,9 +2768,9 @@ describe("Boomerang Extension", () => {
       expect(uiMock.notify).toHaveBeenLastCalledWith("Boomerang tool is enabled", "info");
     });
 
-    it("preserves tool state across session switches", async () => {
+    it("preserves tool state across session replacement", async () => {
       await runBoomerang("tool on");
-      await fireSessionSwitch();
+      await fireSessionReplacement();
       const result = await getTool("boomerang").execute("id", {}, undefined, undefined, mockCtx);
 
       expect(result.content[0].text).toContain("anchor set");

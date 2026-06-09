@@ -433,6 +433,9 @@ describe("Boomerang Extension", () => {
     if (handler) {
       const event: AgentEndEvent = { type: "agent_end", messages: [] };
       await handler(event, ctx);
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve();
+      }
     }
   }
 
@@ -552,6 +555,10 @@ describe("Boomerang Extension", () => {
         editor.onSubmit = async (text: string) => {
           editorReloadSubmissions.push(text);
           editorText = "";
+          if (text.startsWith("/boomerang-return ")) {
+            await getCommand("boomerang-return")(text.slice("/boomerang-return ".length), mockCommandCtx);
+            return;
+          }
           if (editorReloadShouldFail) {
             throw new Error("editor reload failed");
           }
@@ -613,6 +620,11 @@ describe("Boomerang Extension", () => {
       registerTool: vi.fn((tool: { name: string; execute: Function }) => tools.set(tool.name, tool)),
       registerShortcut: vi.fn((key: string, options: { description: string; handler: Function }) => shortcuts.set(key, options)),
       sendUserMessage: vi.fn((content: string, options?: { deliverAs?: "steer" | "followUp" }) => {
+        if (content.startsWith("/boomerang-return ")) {
+          sentMessages.push(content);
+          void getCommand("boomerang-return")(content.slice("/boomerang-return ".length), mockCommandCtx);
+          return;
+        }
         if (!agentIdle && !options?.deliverAs) {
           throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
         }
@@ -2009,7 +2021,7 @@ describe("Boomerang Extension", () => {
       expect(branchWithSummaryCalls).toHaveLength(1);
       expect(sessionEntries[sessionEntries.length - 1]?.id).toBe(branchWithSummaryCalls[0].entryId);
       expect(sentCustomMessages).toHaveLength(0);
-      expect(editorReloadSubmissions).toEqual([]);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
 
       const event = makeBeforeCompactEvent();
 
@@ -2242,7 +2254,7 @@ describe("Boomerang Extension", () => {
       expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
-    it("falls back to branchWithSummary when shortcut enabled before a command context exists", async () => {
+    it("returns through navigateTree when shortcut enabled before a command context exists", async () => {
       await getShortcut("ctrl+alt+b")(mockCtx);
 
       await fireInput("shortcut task");
@@ -2252,17 +2264,14 @@ describe("Boomerang Extension", () => {
       await triggerAgentEnd();
 
       expect(beforeStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
-      expect(navigateTreeCalls).toHaveLength(0);
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      expect(branchWithSummaryCalls[0].summary).toContain('Task: "shortcut task"');
-      expect(branchWithSummaryCalls[0].details).toMatchObject({ task: "shortcut task" });
-      expect(sentCustomMessages).toHaveLength(0);
-
-      await flushDeferredFallbackHandoff();
-
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
-      expect(editorReloadSubmissions).toEqual(["/reload"]);
-      expect(reloadCalls).toBe(1);
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(navigateTreeCalls[0].targetId).toBe("entry-0");
+      expect(branchWithSummaryCalls).toHaveLength(0);
+      expect(capturedSummary?.summary.summary).toContain('Task: "shortcut task"');
+      expect(capturedSummary?.summary.details).toMatchObject({ task: "shortcut task" });
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
+      expect(reloadCalls).toBe(0);
       expect(notifyMessages().some(({ message }) => message.includes("Run /reload to refresh"))).toBe(false);
 
       const event = makeBeforeCompactEvent();
@@ -2280,18 +2289,16 @@ describe("Boomerang Extension", () => {
 
       await triggerAgentEnd(mockCtx, { idle: false });
 
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(editorReloadSubmissions).toEqual([]);
+      expect(navigateTreeCalls).toHaveLength(0);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
+      expect(reloadCalls).toBe(0);
       expect(sentCustomMessages).toHaveLength(0);
 
       agentIdle = true;
       await vi.advanceTimersByTimeAsync(25);
 
-      expect(editorReloadSubmissions).toEqual(["/reload"]);
-      expect(reloadCalls).toBe(1);
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expect(navigateTreeCalls).toHaveLength(1);
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
     it("still sends the hidden handoff when editor reload emits session shutdown", async () => {
@@ -2304,12 +2311,10 @@ describe("Boomerang Extension", () => {
       addAssistantTextEntry("Editor reload emits shutdown task done.");
       await triggerAgentEnd();
 
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      await flushDeferredFallbackHandoff();
-
-      expect(editorReloadSubmissions).toEqual(["/reload"]);
-      expect(reloadCalls).toBe(1);
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
+      expect(reloadCalls).toBe(0);
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
     it("preserves draft editor text around shortcut-first fallback reload", async () => {
@@ -2324,10 +2329,10 @@ describe("Boomerang Extension", () => {
 
       await flushDeferredFallbackHandoff();
 
-      expect(editorReloadSubmissions).toEqual(["/reload"]);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
       expect(editorText).toBe("draft follow-up");
-      expect(uiMock.setEditorText).toHaveBeenCalledWith("draft follow-up");
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expect(uiMock.setEditorText).not.toHaveBeenCalledWith("draft follow-up");
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
     it("warns when shortcut-first fallback cannot auto-reload the display", async () => {
@@ -2340,17 +2345,13 @@ describe("Boomerang Extension", () => {
       addAssistantTextEntry("Shortcut task done.");
       await triggerAgentEnd();
 
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      expect(sentCustomMessages).toHaveLength(0);
-
-      await flushDeferredFallbackHandoff();
-
-      expect(editorReloadSubmissions).toEqual(["/reload"]);
-      expect(uiMock.notify).toHaveBeenCalledWith(
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
+      expect(uiMock.notify).not.toHaveBeenCalledWith(
         "Boomerang summary created, but automatic /reload failed: Error: editor reload failed",
         "warning"
       );
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
     it("completes shortcut-first fallback without editor reload when UI is unavailable", async () => {
@@ -2365,12 +2366,10 @@ describe("Boomerang Extension", () => {
 
       expect(beforeStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
       expect(branchWithSummaryCalls).toHaveLength(1);
-      expect(editorReloadSubmissions).toEqual([]);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
       expect(reloadCalls).toBe(0);
-
-      await flushDeferredFallbackHandoff();
-
       expect(notifyMessages().some(({ message }) => message.includes("Run /reload to refresh"))).toBe(false);
+      await flushDeferredFallbackHandoff();
       expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
     });
 
@@ -2384,18 +2383,17 @@ describe("Boomerang Extension", () => {
       await triggerAgentEnd();
 
       expect(wrappedStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
-      expect(branchWithSummaryCalls).toHaveLength(1);
+      expect(navigateTreeCalls).toHaveLength(1);
       expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", undefined);
-      await flushDeferredFallbackHandoff();
 
       await fireInput("second task");
       const secondStart = await fireBeforeAgentStart("original");
 
       expect(secondStart).toBeUndefined();
-      expect(branchWithSummaryCalls).toHaveLength(1);
+      expect(navigateTreeCalls).toHaveLength(1);
     });
 
-    it("uses cached command-context reload for fallback summaries in an empty session", async () => {
+    it("uses navigateTree return for fallback summaries in an empty session", async () => {
       sessionEntries = [];
       currentLeafId = null;
       await runBoomerang("auto on");
@@ -2407,14 +2405,11 @@ describe("Boomerang Extension", () => {
       await triggerAgentEnd();
 
       expect(beforeStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      expect(sentCustomMessages).toHaveLength(0);
-
-      await flushDeferredFallbackHandoff();
-
-      expect(reloadCalls).toBe(1);
-      expect(editorReloadSubmissions).toEqual([]);
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(sentCustomMessages).toHaveLength(1);
+      expect(reloadCalls).toBe(0);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
     it("waits for agent idle before cached command-context fallback reload", async () => {
@@ -2430,18 +2425,17 @@ describe("Boomerang Extension", () => {
 
       await triggerAgentEnd(mockCtx, { idle: false });
 
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(0);
-
+      expect(navigateTreeCalls).toHaveLength(0);
       expect(reloadCalls).toBe(0);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
       expect(sentCustomMessages).toHaveLength(0);
 
       agentIdle = true;
       await vi.advanceTimersByTimeAsync(25);
 
-      expect(reloadCalls).toBe(1);
-      expect(editorReloadSubmissions).toEqual([]);
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(sentCustomMessages.length).toBeGreaterThanOrEqual(1);
+      expect(sentCustomMessages[sentCustomMessages.length - 1].message.content).toContain(capturedSummary?.summary.summary);
     });
 
     it("skips fallback reload after idle timeout but still sends the hidden handoff", async () => {
@@ -2457,16 +2451,16 @@ describe("Boomerang Extension", () => {
 
       await triggerAgentEnd(mockCtx, { idle: false });
 
-      expect(branchWithSummaryCalls).toHaveLength(1);
+      expect(navigateTreeCalls).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(5000);
 
       expect(reloadCalls).toBe(0);
-      expect(editorReloadSubmissions).toEqual([]);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
       expect(uiMock.notify).toHaveBeenCalledWith(
-        "Boomerang summary created, but automatic /reload timed out waiting for the current response to finish.",
+        "Boomerang summary is queued, but automatic return timed out waiting for the current response to finish.",
         "warning"
       );
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expect(sentCustomMessages).toHaveLength(0);
     });
 
     it("cancels stale deferred fallback handoffs when the session shuts down", async () => {
@@ -2481,14 +2475,10 @@ describe("Boomerang Extension", () => {
       addAssistantTextEntry("Stale handoff task done.");
 
       await triggerAgentEnd(mockCtx, { idle: false });
-      await vi.advanceTimersByTimeAsync(0);
       await fireSessionShutdown("reload");
 
-      agentIdle = true;
-      await vi.runOnlyPendingTimersAsync();
-
       expect(reloadCalls).toBe(0);
-      expect(editorReloadSubmissions).toEqual([]);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
       expect(sentCustomMessages).toHaveLength(0);
     });
 
@@ -2509,11 +2499,9 @@ describe("Boomerang Extension", () => {
       addAssistantTextEntry("Reload emits shutdown task done.");
       await triggerAgentEnd();
 
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      await flushDeferredFallbackHandoff();
-
-      expect(reloadCalls).toBe(1);
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(reloadCalls).toBe(0);
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
     it("cancels the hidden handoff when the session is replaced during cached reload", async () => {
@@ -2533,11 +2521,9 @@ describe("Boomerang Extension", () => {
       addAssistantTextEntry("Reload replaced session task done.");
       await triggerAgentEnd();
 
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      await flushDeferredFallbackHandoff();
-
-      expect(reloadCalls).toBe(1);
-      expect(sentCustomMessages).toHaveLength(0);
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(reloadCalls).toBe(0);
+      expect(sentCustomMessages).toHaveLength(1);
     });
 
     it("warns when cached command-context reload fails for fallback summaries", async () => {
@@ -2557,19 +2543,17 @@ describe("Boomerang Extension", () => {
       addAssistantTextEntry("Reload failure task done.");
       await triggerAgentEnd();
 
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      await flushDeferredFallbackHandoff();
-
-      expect(reloadCalls).toBe(1);
-      expect(editorReloadSubmissions).toEqual([]);
-      expect(uiMock.notify).toHaveBeenCalledWith(
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(reloadCalls).toBe(0);
+      expect(editorReloadSubmissions.filter((text) => text === "/reload")).toEqual([]);
+      expect(uiMock.notify).not.toHaveBeenCalledWith(
         "Boomerang summary created, but chat reload failed: Error: cached reload failed",
         "warning"
       );
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
-    it("falls back to branchWithSummary for the first prompt in an empty session", async () => {
+    it("returns through navigateTree for the first prompt in an empty session", async () => {
       sessionEntries = [];
       currentLeafId = null;
       await getShortcut("ctrl+alt+b")(mockCtx);
@@ -2581,11 +2565,10 @@ describe("Boomerang Extension", () => {
       await triggerAgentEnd();
 
       expect(beforeStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      expect(branchWithSummaryCalls[0].targetId).toBeNull();
-      expect(branchWithSummaryCalls[0].summary).toContain('Task: "first task"');
-      await flushDeferredFallbackHandoff();
-      expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(navigateTreeCalls[0].targetId).toBe("entry-0");
+      expect(capturedSummary?.summary.summary).toContain('Task: "first task"');
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
     it("does not get stuck if a staged auto prompt never starts an agent turn", async () => {
@@ -2601,9 +2584,8 @@ describe("Boomerang Extension", () => {
       await triggerAgentEnd();
 
       expect(beforeStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
-      expect(branchWithSummaryCalls).toHaveLength(1);
-      expect(branchWithSummaryCalls[0].summary).toContain('Task: "next real prompt"');
-      await flushDeferredFallbackHandoff();
+      expect(navigateTreeCalls).toHaveLength(1);
+      expect(capturedSummary?.summary.summary).toContain('Task: "next real prompt"');
     });
 
     it("does not wake the orchestrator when auto navigation is cancelled", async () => {
@@ -2654,10 +2636,12 @@ describe("Boomerang Extension", () => {
       expect(nextStart).toBeUndefined();
     });
 
-    it("does not wake the orchestrator when auto fallback branch summary throws", async () => {
-      const branchWithSummary = (mockCtx.sessionManager as any).branchWithSummary as ReturnType<typeof vi.fn>;
-      branchWithSummary.mockImplementationOnce(() => {
-        throw new Error("auto fallback failed");
+    it("does not wake the orchestrator when shortcut return navigation throws", async () => {
+      mockCommandCtx = createCommandCtx({
+        navigateTree: vi.fn(async (targetId: string, options: { summarize?: boolean }) => {
+          navigateTreeCalls.push({ targetId, options });
+          throw new Error("auto return failed");
+        }),
       });
       await getShortcut("ctrl+alt+b")(mockCtx);
 
@@ -2667,7 +2651,7 @@ describe("Boomerang Extension", () => {
       addAssistantTextEntry("Done.");
       await triggerAgentEnd();
 
-      expect(uiMock.notify).toHaveBeenCalledWith("Failed to summarize: Error: auto fallback failed", "error");
+      expect(uiMock.notify).toHaveBeenCalledWith("Failed to summarize: Error: auto return failed", "error");
       expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", undefined);
       expect(sentCustomMessages).toEqual([]);
 

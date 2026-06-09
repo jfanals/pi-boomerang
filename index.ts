@@ -588,6 +588,7 @@ export default function (pi: ExtensionAPI) {
   let autoBoomerangEnabled = false;
   let autoBoomerangCandidate: { targetId: string | null; task: string } | null = null;
   let autoFallbackCollapse: { targetId: string | null; task: string } | null = null;
+  let autoFallbackReturn: { id: string; targetId: string; task: string; restoreEditorText?: string } | null = null;
   let autoAwaitingAssistantAfterId: string | null = null;
   let sessionGeneration = 0;
   let fallbackReloadInProgress = false;
@@ -840,6 +841,7 @@ export default function (pi: ExtensionAPI) {
     autoBoomerangEnabled = false;
     autoBoomerangCandidate = null;
     autoFallbackCollapse = null;
+    autoFallbackReturn = null;
     autoAwaitingAssistantAfterId = null;
   }
 
@@ -855,6 +857,7 @@ export default function (pi: ExtensionAPI) {
     awaitingAssistantForTask = null;
     autoBoomerangCandidate = null;
     autoFallbackCollapse = null;
+    autoFallbackReturn = null;
     autoAwaitingAssistantAfterId = null;
   }
 
@@ -1311,7 +1314,7 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function submitReloadThroughEditor(ctx: ExtensionContext): Promise<void> {
+  async function submitCommandThroughEditor(ctx: ExtensionContext, command: string): Promise<void> {
     const editorText = ctx.ui.getEditorText();
     let editorRef: CustomEditor | null = null;
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
@@ -1324,12 +1327,16 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      await editorRef.onSubmit("/reload");
+      await editorRef.onSubmit(command);
     } finally {
       if (editorText.length > 0) {
         ctx.ui.setEditorText(editorText);
       }
     }
+  }
+
+  async function submitReloadThroughEditor(ctx: ExtensionContext): Promise<void> {
+    await submitCommandThroughEditor(ctx, "/reload");
   }
 
   function isCurrentSessionGeneration(generation: number): boolean {
@@ -1417,6 +1424,36 @@ export default function (pi: ExtensionAPI) {
         }
       })();
     }, 0);
+  }
+
+  function queueAutoFallbackReturn(fallbackCollapse: { targetId: string; task: string }, ctx: ExtensionContext): void {
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const restoreEditorText = ctx.hasUI ? ctx.ui.getEditorText() : undefined;
+    autoFallbackReturn = { id, targetId: fallbackCollapse.targetId, task: fallbackCollapse.task, restoreEditorText };
+    autoFallbackCollapse = null;
+    updateStatus(ctx);
+
+    if (!ctx.hasUI) {
+      notifyFallbackWarning(ctx, "Boomerang summary is queued, but no UI is available to return through /tree automatically.");
+      return;
+    }
+
+    const generation = sessionGeneration;
+    void (async () => {
+      try {
+        const waitResult = await waitForIdleBeforeFallbackReload(ctx, generation);
+        if (waitResult === "stale") return;
+        if (waitResult !== "idle") {
+          notifyFallbackWarning(ctx, "Boomerang summary is queued, but automatic return timed out waiting for the current response to finish.");
+          return;
+        }
+        await submitCommandThroughEditor(ctx, `/boomerang-return ${id}`);
+      } catch (error) {
+        if (isCurrentSessionGeneration(generation)) {
+          notifyFallbackWarning(ctx, `Boomerang automatic return failed: ${String(error)}`);
+        }
+      }
+    })();
   }
 
   function updateStatus(ctx: ExtensionContext) {
@@ -1960,11 +1997,58 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("boomerang-return", {
+    description: "Internal boomerang return command",
+    handler: async (args, ctx) => {
+      storedCommandCtx = ctx;
+      reloadFallbackDisplay = () => ctx.reload();
+      const id = args.trim();
+      if (!autoFallbackReturn || autoFallbackReturn.id !== id) {
+        ctx.ui.notify("No pending boomerang return", "warning");
+        return;
+      }
+
+      const returnRequest = autoFallbackReturn;
+      autoFallbackReturn = null;
+      pendingCollapse = { targetId: returnRequest.targetId, task: returnRequest.task, commandCtx: ctx };
+
+      let shouldTriggerHandoff = false;
+      let handoffSummary: string | null = null;
+      try {
+        globalThis.__boomerangCollapseInProgress = true;
+        keepBoomerangExpanded(ctx);
+        const result = await ctx.navigateTree(returnRequest.targetId, { summarize: true });
+        if (returnRequest.restoreEditorText !== undefined) {
+          ctx.ui.setEditorText(returnRequest.restoreEditorText);
+        }
+        if (result.cancelled) {
+          ctx.ui.notify("Summary cancelled", "warning");
+        } else {
+          justCollapsedEntryId = ctx.sessionManager.getLeafId();
+          handoffSummary = lastHandoffSummary ?? lastTaskSummary;
+          ctx.ui.notify("Boomerang complete. Context summarized.", "info");
+          shouldTriggerHandoff = true;
+        }
+      } catch (err) {
+        ctx.ui.notify(`Failed to summarize: ${String(err)}`, "error");
+      } finally {
+        globalThis.__boomerangCollapseInProgress = false;
+      }
+
+      await restoreModelAndThinking(ctx);
+      clearTaskState();
+      updateStatus(ctx);
+      if (shouldTriggerHandoff && handoffSummary) {
+        triggerHiddenOrchestratorHandoff(handoffSummary);
+      }
+    },
+  });
+
   pi.registerCommand("boomerang-cancel", {
     description: "Cancel active boomerang (no context summary)",
     handler: async (_args, ctx) => {
       storedCommandCtx = ctx;
-      const hasActive = boomerangActive || chainState || toolAnchorEntryId !== null || toolCollapsePending || toolQueuedTask !== null;
+      const hasActive = boomerangActive || chainState || toolAnchorEntryId !== null || toolCollapsePending || toolQueuedTask !== null || autoFallbackReturn !== null;
       if (!hasActive) {
         ctx.ui.notify("No boomerang active", "warning");
         return;
@@ -1976,6 +2060,7 @@ export default function (pi: ExtensionAPI) {
       toolAnchorEntryId = null;
       toolCollapsePending = false;
       toolQueuedTask = null;
+      autoFallbackReturn = null;
       updateStatus(ctx);
       ctx.ui.notify("Boomerang cancelled", "info");
     },
@@ -1991,7 +2076,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("input", async (event, ctx) => {
     autoBoomerangCandidate = null;
     if (!autoBoomerangEnabled) return;
-    if (boomerangActive || pendingCollapse || rethrowState || chainState || toolCollapsePending || toolQueuedTask || toolAnchorEntryId) return;
+    if (boomerangActive || pendingCollapse || rethrowState || chainState || toolCollapsePending || toolQueuedTask || toolAnchorEntryId || autoFallbackReturn) return;
     if (!event.text.trim() || isPiControlCommandInput(event.text)) return;
 
     autoBoomerangCandidate = {
@@ -2088,7 +2173,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     let systemPrompt = event.systemPrompt;
 
-    if (autoBoomerangCandidate && autoBoomerangEnabled && !boomerangActive && !pendingCollapse && !rethrowState && !chainState && !toolCollapsePending && !toolQueuedTask && !toolAnchorEntryId) {
+    if (autoBoomerangCandidate && autoBoomerangEnabled && !boomerangActive && !pendingCollapse && !rethrowState && !chainState && !toolCollapsePending && !toolQueuedTask && !toolAnchorEntryId && !autoFallbackReturn) {
       const candidate = autoBoomerangCandidate;
       autoBoomerangCandidate = null;
       autoBoomerangEnabled = false;
@@ -2241,19 +2326,25 @@ export default function (pi: ExtensionAPI) {
 
     if (boomerangActive && autoFallbackCollapse) {
       const fallbackCollapse = autoFallbackCollapse;
+
       const sm = ctx.sessionManager as SessionManager;
       const branch = sm.getBranch();
-      const startIndex = fallbackCollapse.targetId === null
-        ? -1
-        : branch.findIndex((entry) => entry.id === fallbackCollapse.targetId);
-      const workEntries = branch.slice(startIndex + 1);
+      const returnTargetId = fallbackCollapse.targetId ?? branch[0]?.id ?? null;
+      if (returnTargetId !== null && ctx.hasUI) {
+        queueAutoFallbackReturn({ targetId: returnTargetId, task: fallbackCollapse.task }, ctx);
+        return;
+      }
+
+      const workEntries = returnTargetId === null
+        ? branch
+        : branch.slice(branch.findIndex((entry) => entry.id === returnTargetId) + 1);
       const generatedSummary = generateSummaryFromEntries(workEntries, fallbackCollapse.task);
       let shouldTriggerHandoff = false;
       let fallbackCollapsedEntryId: string | null = null;
 
       try {
         keepBoomerangExpanded(ctx);
-        const entryId = sm.branchWithSummary(fallbackCollapse.targetId, generatedSummary.summary, generatedSummary.details);
+        const entryId = sm.branchWithSummary(returnTargetId, generatedSummary.summary, generatedSummary.details);
         fallbackCollapsedEntryId = entryId;
         justCollapsedEntryId = entryId;
         ctx.ui.notify("Boomerang complete. Context summarized.", "info");

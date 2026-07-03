@@ -675,7 +675,7 @@ describe("Boomerang Extension", () => {
       await runBoomerang("");
 
       expect(uiMock.notify).toHaveBeenCalledWith(
-        "Usage: /boomerang <task> | auto [on|off|toggle|status] | anchor | tool [on|off] | guidance [text|clear]",
+        "Usage: /boomerang <task> | compact-last | auto [on|off|toggle|status] | anchor | tool [on|off] | guidance [text|clear]",
         "error"
       );
       expect(sentMessages).toEqual([]);
@@ -1278,6 +1278,48 @@ describe("Boomerang Extension", () => {
       expect(summary).toContain("- Failures: bash `git diff --check`: trailing whitespace in src/auth.ts");
       expect(capturedSummary.summary.details.readFiles).toEqual(["src/auth.ts", "src/session.ts"]);
       expect(capturedSummary.summary.details.failedOperations).toEqual(["bash `git diff --check`: trailing whitespace in src/auth.ts"]);
+    });
+  });
+
+  describe("compact-last", () => {
+    it("retroactively compacts the most recent completed normal turn", async () => {
+      const targetId = currentLeafId;
+      addUserTextEntry("implement compact last");
+      addAssistantToolEntry("edit", "index.ts");
+      addAssistantTextEntry("Implemented compact-last.");
+
+      await runBoomerang("compact-last");
+
+      expect(navigateTreeCalls).toEqual([{ targetId, options: { summarize: true } }]);
+      expect(capturedSummary?.summary.summary).toContain("[BOOMERANG COMPLETE]");
+      expect(capturedSummary?.summary.summary).toContain('Task: "implement compact last"');
+      expect(capturedSummary?.summary.summary).toContain("Outcome:\nImplemented compact-last.");
+      expect(capturedSummary?.summary.summary).toContain("Changed Files:\n- index.ts");
+      expect(uiMock.notify).toHaveBeenCalledWith("Previous turn compacted into a boomerang summary.", "info");
+      expectBoomerangHandoff(1, capturedSummary?.summary.summary);
+    });
+
+    it("skips boomerang command user messages when finding the last completed turn", async () => {
+      const targetId = currentLeafId;
+      addUserTextEntry("do real work");
+      addAssistantTextEntry("Real work done.");
+      addUserTextEntry("/boomerang compact-last");
+      addAssistantTextEntry("Command acknowledgement.");
+
+      await runBoomerang("compact-last");
+
+      expect(navigateTreeCalls).toEqual([{ targetId, options: { summarize: true } }]);
+      expect(capturedSummary?.summary.summary).toContain('Task: "do real work"');
+      expect(capturedSummary?.summary.summary).not.toContain('Task: "/boomerang compact-last"');
+    });
+
+    it("reports when no completed turn can be compacted", async () => {
+      addUserTextEntry("unfinished work");
+
+      await runBoomerang("compact-last");
+
+      expect(navigateTreeCalls).toHaveLength(0);
+      expect(uiMock.notify).toHaveBeenCalledWith("No completed turn found to compact.", "warning");
     });
   });
 

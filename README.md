@@ -64,6 +64,9 @@ Then restart pi to load the extension.
 # Shortcut: Ctrl+Alt+B
 /boomerang auto on
 
+# Retroactively compact the most recent completed normal turn
+/boomerang compact-last
+
 # Cancel mid-task (no summary)
 /boomerang-cancel
 ```
@@ -160,6 +163,18 @@ Press `Ctrl+Alt+B` or run `/boomerang auto on` to turn on auto-boomerang for nor
 
 Auto mode is session-only and sticky: it stays on after wrapping a prompt, so use `/boomerang auto off`, `/boomerang auto toggle`, or `Ctrl+Alt+B` again to turn it off. The footer shows `🪃 auto` while it is on and idle. Fallback summaries return through Pi tree navigation so the active context is collapsed without triggering `/reload`.
 
+## Retroactive Compaction
+
+If you finish a normal turn and wish you had run it as boomerang, compact it afterward:
+
+```bash
+/boomerang compact-last
+```
+
+This finds the most recent completed normal user turn, summarizes that branch in the usual `[BOOMERANG COMPLETE]` format, navigates back to the turn's parent, and sends the same hidden handoff follow-up. Aliases: `/boomerang retro`, `/boomerang summarize-last`, `/boomerang collapse-last`.
+
+This is context-equivalent, not behavior-equivalent: the already-finished agent did not receive boomerang's autonomous-work instructions before it ran.
+
 ## Anchor Mode
 
 By default, each boomerang summarizes just its own work. Set an anchor when you want multiple tasks to share the same summary point:
@@ -215,6 +230,8 @@ One quirk: tool-initiated anchor summaries may not update the UI immediately (th
 | `/boomerang <task>` | Execute and summarize context |
 | `/boomerang <task> --rethrow N` | Re-run full task N times with summaries between rethrows |
 | `/boomerang <task> --loop N` | Alias for `--rethrow N` in boomerang mode |
+| `/boomerang compact-last` | Retroactively summarize the most recent completed normal turn |
+| `/boomerang retro` | Alias for `compact-last` |
 | `/boomerang /<template> [args]` | Run template and summarize context |
 | `/boomerang /a -> /b -> /c` | Chain templates |
 | `/boomerang /a -> /b --rethrow 2` | Chain templates, then rethrow full chain twice |

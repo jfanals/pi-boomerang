@@ -941,6 +941,86 @@ export default function (pi: ExtensionAPI) {
     return false;
   }
 
+  function isBoomerangCommandUserText(text: string): boolean {
+    const trimmed = text.trim();
+    return trimmed === "/boomerang" || trimmed.startsWith("/boomerang ") || trimmed === "/boomerang-cancel" || trimmed.startsWith("/boomerang-cancel ");
+  }
+
+  function isBoomerangSummaryText(text: string): boolean {
+    return text.includes("[BOOMERANG COMPLETE]") || text.includes("<boomerang-summary>");
+  }
+
+  function findLastCompletedTurn(entries: SessionEntry[]): { targetId: string; task: string } | null {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const task = getUserMessageText(entries[i])?.trim();
+      if (!task) continue;
+      if (isBoomerangCommandUserText(task)) continue;
+      if (isBoomerangSummaryText(task)) continue;
+      if (!hasAssistantMessageAfterIndex(entries, i)) continue;
+
+      const parentId = typeof entries[i].parentId === "string"
+        ? entries[i].parentId
+        : entries[i - 1]?.id;
+      if (!parentId) {
+        return null;
+      }
+
+      return { targetId: parentId, task };
+    }
+
+    return null;
+  }
+
+  async function compactLastCompletedTurn(ctx: ExtensionCommandContext): Promise<void> {
+    if (boomerangActive || chainState || pendingCollapse || rethrowState || toolCollapsePending || toolQueuedTask || toolAnchorEntryId || autoFallbackReturn) {
+      ctx.ui.notify("Boomerang already active. Use /boomerang-cancel to abort.", "error");
+      return;
+    }
+    if (!ctx.isIdle()) {
+      ctx.ui.notify("Agent is busy. Wait for completion first.", "error");
+      return;
+    }
+
+    const branch = (ctx.sessionManager as SessionManager).getBranch();
+    const turn = findLastCompletedTurn(branch);
+    if (!turn) {
+      ctx.ui.notify("No completed turn found to compact.", "warning");
+      return;
+    }
+
+    lastTaskSummary = null;
+    lastHandoffSummary = null;
+    pendingCollapse = { targetId: turn.targetId, task: turn.task, commandCtx: ctx };
+
+    let shouldTriggerHandoff = false;
+    let handoffSummary: string | null = null;
+    try {
+      globalThis.__boomerangCollapseInProgress = true;
+      keepBoomerangExpanded(ctx);
+      const result = await ctx.navigateTree(turn.targetId, { summarize: true });
+      if (result.cancelled) {
+        ctx.ui.notify("Summary cancelled", "warning");
+      } else {
+        justCollapsedEntryId = ctx.sessionManager.getLeafId();
+        handoffSummary = lastHandoffSummary ?? lastTaskSummary;
+        ctx.ui.notify("Previous turn compacted into a boomerang summary.", "info");
+        shouldTriggerHandoff = true;
+      }
+    } catch (err) {
+      ctx.ui.notify(`Failed to summarize: ${String(err)}`, "error");
+    } finally {
+      globalThis.__boomerangCollapseInProgress = false;
+    }
+
+    pendingCollapse = null;
+    lastTaskSummary = null;
+    lastHandoffSummary = null;
+    updateStatus(ctx);
+    if (shouldTriggerHandoff && handoffSummary) {
+      triggerHiddenOrchestratorHandoff(handoffSummary);
+    }
+  }
+
   async function handleChain(
     parsed: { steps: Array<{ templateRef: string; args: string[] }>; globalArgs: string[] },
     ctx: ExtensionCommandContext,
@@ -1980,8 +2060,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (["compact-last", "retro", "summarize-last", "collapse-last"].includes(trimmed)) {
+        await compactLastCompletedTurn(ctx);
+        return;
+      }
+
       if (!trimmed) {
-        ctx.ui.notify("Usage: /boomerang <task> | auto [on|off|toggle|status] | anchor | tool [on|off] | guidance [text|clear]", "error");
+        ctx.ui.notify("Usage: /boomerang <task> | compact-last | auto [on|off|toggle|status] | anchor | tool [on|off] | guidance [text|clear]", "error");
         return;
       }
       if (boomerangActive || chainState) {

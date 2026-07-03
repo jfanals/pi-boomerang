@@ -2250,7 +2250,7 @@ describe("Boomerang Extension", () => {
       expect(navigateTreeCalls).toHaveLength(1);
       expect(navigateTreeCalls[0].targetId).toBe("entry-0");
       expect(capturedSummary?.summary.summary).toContain('Task: "fix auth"');
-      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", undefined);
+      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", "[accent]🪃 auto");
       expectBoomerangHandoff(1, capturedSummary?.summary.summary);
     });
 
@@ -2373,24 +2373,23 @@ describe("Boomerang Extension", () => {
       expectBoomerangHandoff(1, branchWithSummaryCalls[0].summary);
     });
 
-    it("turns auto mode off after wrapping one prompt", async () => {
+    it("keeps auto mode on after wrapping one prompt", async () => {
       await getShortcut("ctrl+alt+b")(mockCtx);
 
-      await fireInput("one-shot task");
+      await fireInput("sticky task");
       const wrappedStart = await fireBeforeAgentStart("original");
-      addUserTextEntry("one-shot task");
-      addAssistantTextEntry("One-shot task done.");
+      addUserTextEntry("sticky task");
+      addAssistantTextEntry("Sticky task done.");
       await triggerAgentEnd();
 
       expect(wrappedStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
       expect(navigateTreeCalls).toHaveLength(1);
-      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", undefined);
+      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", "[accent]🪃 auto");
 
       await fireInput("second task");
       const secondStart = await fireBeforeAgentStart("original");
 
-      expect(secondStart).toBeUndefined();
-      expect(navigateTreeCalls).toHaveLength(1);
+      expect(secondStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
     });
 
     it("uses navigateTree return for fallback summaries in an empty session", async () => {
@@ -2604,12 +2603,12 @@ describe("Boomerang Extension", () => {
       await triggerAgentEnd();
 
       expect(uiMock.notify).toHaveBeenCalledWith("Summary cancelled", "warning");
-      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", undefined);
+      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", "[accent]🪃 auto");
       expect(sentCustomMessages).toEqual([]);
 
       await fireInput("after cancellation");
       const nextStart = await fireBeforeAgentStart("original");
-      expect(nextStart).toBeUndefined();
+      expect(nextStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
     });
 
     it("does not wake the orchestrator when auto navigation throws", async () => {
@@ -2628,12 +2627,12 @@ describe("Boomerang Extension", () => {
       await triggerAgentEnd();
 
       expect(uiMock.notify).toHaveBeenCalledWith("Failed to summarize: Error: auto navigation failed", "error");
-      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", undefined);
+      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", "[accent]🪃 auto");
       expect(sentCustomMessages).toEqual([]);
 
       await fireInput("after navigation failure");
       const nextStart = await fireBeforeAgentStart("original");
-      expect(nextStart).toBeUndefined();
+      expect(nextStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
     });
 
     it("does not wake the orchestrator when shortcut return navigation throws", async () => {
@@ -2652,12 +2651,12 @@ describe("Boomerang Extension", () => {
       await triggerAgentEnd();
 
       expect(uiMock.notify).toHaveBeenCalledWith("Failed to summarize: Error: auto return failed", "error");
-      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", undefined);
+      expect(uiMock.setStatus).toHaveBeenLastCalledWith("boomerang", "[accent]🪃 auto");
       expect(sentCustomMessages).toEqual([]);
 
       await fireInput("after fallback failure");
       const nextStart = await fireBeforeAgentStart("original");
-      expect(nextStart).toBeUndefined();
+      expect(nextStart?.systemPrompt).toContain("BOOMERANG MODE ACTIVE");
     });
 
     it("resets auto mode on session_start", async () => {

@@ -2176,7 +2176,6 @@ export default function (pi: ExtensionAPI) {
     if (autoBoomerangCandidate && autoBoomerangEnabled && !boomerangActive && !pendingCollapse && !rethrowState && !chainState && !toolCollapsePending && !toolQueuedTask && !toolAnchorEntryId && !autoFallbackReturn) {
       const candidate = autoBoomerangCandidate;
       autoBoomerangCandidate = null;
-      autoBoomerangEnabled = false;
       boomerangActive = true;
       lastTaskSummary = null;
       lastHandoffSummary = null;

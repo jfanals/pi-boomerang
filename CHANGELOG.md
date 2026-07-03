@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Auto-boomerang mode is sticky again: it stays enabled after wrapping a prompt and must be toggled off explicitly.
+
 ## [0.6.6] - 2026-05-20
 
 ### Fixed

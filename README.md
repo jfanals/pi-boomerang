@@ -156,9 +156,9 @@ Commit current work. $@
 
 ## Auto Mode
 
-Press `Ctrl+Alt+B` or run `/boomerang auto on` to turn on auto-boomerang for the next normal submitted prompt. Auto mode includes prompt templates such as `/review`, but it does not wrap Pi control commands like `/boomerang`, `/model`, or `/tree`.
+Press `Ctrl+Alt+B` or run `/boomerang auto on` to turn on auto-boomerang for normal submitted prompts. Auto mode includes prompt templates such as `/review`, but it does not wrap Pi control commands like `/boomerang`, `/model`, or `/tree`.
 
-Auto mode is session-only and one-shot: it turns off after it wraps the next prompt, so re-enable it each time you want an automatic checkpoint. Use `/boomerang auto off`, `/boomerang auto toggle`, or `Ctrl+Alt+B` again to turn it off before the next prompt. The footer shows `🪃 auto` while it is on and idle. Fallback summaries auto-refresh the chat with `/reload` so raw branch content is removed from the display after the summary is created.
+Auto mode is session-only and sticky: it stays on after wrapping a prompt, so use `/boomerang auto off`, `/boomerang auto toggle`, or `Ctrl+Alt+B` again to turn it off. The footer shows `🪃 auto` while it is on and idle. Fallback summaries return through Pi tree navigation so the active context is collapsed without triggering `/reload`.
 
 ## Anchor Mode
 
@@ -210,8 +210,8 @@ One quirk: tool-initiated anchor summaries may not update the UI immediately (th
 
 | Command | What it does |
 |---------|--------------|
-| `Ctrl+Alt+B` | Turn auto-boomerang on or off for the next prompt |
-| `/boomerang auto [on\|off\|toggle\|status]` | Control one-shot auto-boomerang mode for normal prompts |
+| `Ctrl+Alt+B` | Toggle sticky auto-boomerang mode on or off |
+| `/boomerang auto [on\|off\|toggle\|status]` | Control sticky auto-boomerang mode for normal prompts |
 | `/boomerang <task>` | Execute and summarize context |
 | `/boomerang <task> --rethrow N` | Re-run full task N times with summaries between rethrows |
 | `/boomerang <task> --loop N` | Alias for `--rethrow N` in boomerang mode |

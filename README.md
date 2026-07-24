@@ -171,7 +171,7 @@ If you finish a normal turn and wish you had run it as boomerang, compact it aft
 /boomerang compact-last
 ```
 
-This finds the most recent completed normal user turn, summarizes that branch in the usual `[BOOMERANG COMPLETE]` format, navigates back to the turn's parent, and sends the same hidden handoff follow-up. Aliases: `/boomerang retro`, `/boomerang summarize-last`, `/boomerang collapse-last`.
+This finds the most recent completed normal user turn, summarizes that branch in the usual `[BOOMERANG COMPLETE]` format, navigates back to the turn's parent, and sends the same hidden handoff follow-up.
 
 This is context-equivalent, not behavior-equivalent: the already-finished agent did not receive boomerang's autonomous-work instructions before it ran.
 
@@ -231,7 +231,6 @@ One quirk: tool-initiated anchor summaries may not update the UI immediately (th
 | `/boomerang <task> --rethrow N` | Re-run full task N times with summaries between rethrows |
 | `/boomerang <task> --loop N` | Alias for `--rethrow N` in boomerang mode |
 | `/boomerang compact-last` | Retroactively summarize the most recent completed normal turn |
-| `/boomerang retro` | Alias for `compact-last` |
 | `/boomerang /<template> [args]` | Run template and summarize context |
 | `/boomerang /a -> /b -> /c` | Chain templates |
 | `/boomerang /a -> /b --rethrow 2` | Chain templates, then rethrow full chain twice |

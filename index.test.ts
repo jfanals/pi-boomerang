@@ -182,7 +182,7 @@ describe("Boomerang Extension", () => {
   let switchFailures: Set<string>;
 
   let handlers: Map<string, Function[]>;
-  let commands: Map<string, { description: string; handler: Function }>;
+  let commands: Map<string, { description: string; handler: Function; getArgumentCompletions?: Function }>;
   let tools: Map<string, { name: string; execute: Function }>;
   let shortcuts: Map<string, { description: string; handler: Function }>;
   let sentMessages: string[];
@@ -616,7 +616,7 @@ describe("Boomerang Extension", () => {
         if (!handlers.has(event)) handlers.set(event, []);
         handlers.get(event)!.push(handler);
       }),
-      registerCommand: vi.fn((name: string, options: { description: string; handler: Function }) => commands.set(name, options)),
+      registerCommand: vi.fn((name: string, options: { description: string; handler: Function; getArgumentCompletions?: Function }) => commands.set(name, options)),
       registerTool: vi.fn((tool: { name: string; execute: Function }) => tools.set(tool.name, tool)),
       registerShortcut: vi.fn((key: string, options: { description: string; handler: Function }) => shortcuts.set(key, options)),
       sendUserMessage: vi.fn((content: string, options?: { deliverAs?: "steer" | "followUp" }) => {
@@ -668,6 +668,36 @@ describe("Boomerang Extension", () => {
     vi.useRealTimers();
     delete globalThis.__boomerangCollapseInProgress;
     rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  describe("argument completions", () => {
+    it("suggests compact-last from a partial prefix", async () => {
+      const completions = await commands.get("boomerang")!.getArgumentCompletions!("com");
+
+      expect(completions).toContainEqual({
+        value: "compact-last",
+        label: "compact-last",
+        description: "Retroactively summarize the most recent completed normal turn",
+      });
+    });
+
+    it("suggests nested subcommands using the full argument prefix", async () => {
+      const completions = await commands.get("boomerang")!.getArgumentCompletions!("auto o");
+
+      expect(completions.map((item: { value: string }) => item.value)).toEqual(["auto on", "auto off"]);
+    });
+
+    it("returns compact-last and common subcommands for an empty prefix", async () => {
+      const completions = await commands.get("boomerang")!.getArgumentCompletions!("");
+      const values = completions.map((item: { value: string }) => item.value);
+
+      expect(values).toContain("compact-last");
+      expect(values).not.toContain("retro");
+      expect(values).not.toContain("summarize-last");
+      expect(values).not.toContain("collapse-last");
+      expect(values).toContain("anchor clear");
+      expect(values).toContain("tool on");
+    });
   });
 
   describe("validation order", () => {

@@ -1946,8 +1946,37 @@ export default function (pi: ExtensionAPI) {
     markAwaitingAssistant(ctx, task, leafBeforeSend ?? targetId);
   }
 
+  const boomerangArgumentCompletions = [
+    { value: "compact-last", label: "compact-last", description: "Retroactively summarize the most recent completed normal turn" },
+    { value: "auto on", label: "auto on", description: "Enable sticky auto-boomerang for future prompts" },
+    { value: "auto off", label: "auto off", description: "Disable sticky auto-boomerang" },
+    { value: "auto toggle", label: "auto toggle", description: "Toggle sticky auto-boomerang" },
+    { value: "auto status", label: "auto status", description: "Show whether auto-boomerang is enabled" },
+    { value: "anchor", label: "anchor", description: "Set the current entry as the shared summary point" },
+    { value: "anchor show", label: "anchor show", description: "Show the current anchor" },
+    { value: "anchor clear", label: "anchor clear", description: "Clear the current anchor" },
+    { value: "tool on", label: "tool on", description: "Enable the agent-callable boomerang tool" },
+    { value: "tool off", label: "tool off", description: "Disable the agent-callable boomerang tool" },
+    { value: "tool", label: "tool", description: "Show boomerang tool status" },
+    { value: "guidance", label: "guidance", description: "Show current boomerang tool guidance" },
+    { value: "guidance clear", label: "guidance clear", description: "Clear boomerang tool guidance" },
+  ];
+
+  function getBoomerangArgumentCompletions(argumentPrefix: string) {
+    const query = argumentPrefix.trimStart().toLowerCase();
+    if (!query) return boomerangArgumentCompletions;
+
+    const normalizedQuery = query.replace(/\s+/g, " ");
+    return boomerangArgumentCompletions.filter((item) => {
+      const value = item.value.toLowerCase();
+      const label = item.label.toLowerCase();
+      return value.startsWith(normalizedQuery) || label.includes(normalizedQuery);
+    });
+  }
+
   pi.registerCommand("boomerang", {
     description: "Execute task autonomously, then summarize context",
+    getArgumentCompletions: getBoomerangArgumentCompletions,
     handler: async (args, ctx) => {
       storedCommandCtx = ctx;
       reloadFallbackDisplay = () => ctx.reload();
@@ -2060,7 +2089,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (["compact-last", "retro", "summarize-last", "collapse-last"].includes(trimmed)) {
+      if (trimmed === "compact-last") {
         await compactLastCompletedTurn(ctx);
         return;
       }
